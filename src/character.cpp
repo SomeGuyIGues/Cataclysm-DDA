@@ -1334,7 +1334,7 @@ bool Character::overmap_los( const tripoint_abs_omt &omt, int sight_points ) con
 
 int Character::overmap_sight_range( float light_level ) const
 {
-    // How many map tiles I can given the light??
+    // How many map tiles I can see given the light??
     int sight = sight_range( light_level );
     // What are these doing???
     if( sight < SEEX ) {
@@ -1380,7 +1380,16 @@ int Character::overmap_modified_sight_range( float light_level ) const
                            ( is_mounted() && mounted_creature->has_flag( mon_flag_MECH_RECON_VISION ) ) ||
                            get_map().veh_at( pos_bub() ).avail_part_with_feature( "ENHANCED_VISION" ).has_value();
 
-    if( has_optic ) {
+    const bool has_scoped_gun = cache_has_item_with( "is_gun", &item::is_gun, [&]( const item & gun ) {
+        for( const item *mod : gun.gunmods() ) {
+            if( mod->has_flag( flag_ZOOM ) ) {
+                return true;
+            }
+        }
+        return false;
+    } );
+
+    if( has_optic || has_scoped_gun ) {
         sight *= 2;
     }
 
@@ -13068,12 +13077,20 @@ bool Character::wield( item &it, std::optional<int> obtain_cost )
     invalidate_inventory_validity_cache();
     invalidate_leak_level_cache();
 
+    item_location wielded = get_wielded_item();
+
     if( has_wield_conflicts( it ) ) {
         const bool is_unwielding = is_wielding( it );
         const auto ret = can_unwield( it );
 
         if( !ret.success() ) {
             add_msg_if_player( m_info, "%s", ret.c_str() );
+            return false;
+        }
+
+        if( !is_unwielding && wielded->has_item( it ) ) {
+            add_msg_if_player( m_info,
+                               _( "You need to put the bag away before trying to wield something from it." ) );
             return false;
         }
 
@@ -13087,13 +13104,6 @@ bool Character::wield( item &it, std::optional<int> obtain_cost )
             }
             return true;
         }
-    }
-
-    item_location wielded = get_wielded_item();
-    if( wielded && wielded->has_item( it ) ) {
-        add_msg_if_player( m_info,
-                           _( "You need to put the bag away before trying to wield something from it." ) );
-        return false;
     }
 
     if( !can_wield( it ).success() ) {
@@ -13121,30 +13131,36 @@ bool Character::wield( item &it, std::optional<int> obtain_cost )
     add_msg_debug( debugmode::DF_AVATAR, "wielding took %d moves", mv );
     mod_moves( -mv );
 
-    bool had_item = has_item( it );
-    if( combine_stacks ) {
-        wielded->combine( it );
+    item to_wield;
+    if( has_item( it ) ) {
+        to_wield = i_rem( &it );
     } else {
-        set_wielded_item( it );
+        // is_null means fists
+        to_wield = it.is_null() ? item() : it;
     }
 
-    if( had_item ) {
-        i_rem( &it );
+    if( combine_stacks ) {
+        wielded->combine( to_wield );
+    } else {
+        set_wielded_item( to_wield );
     }
 
     // set_wielded_item invalidates the weapon item_location, so get it again
     wielded = get_wielded_item();
-    last_item = wielded->typeId();
     recoil = MAX_RECOIL;
 
-    wielded->on_wield( *this );
-
-    cata::event e = cata::event::make<event_type::character_wields_item>( getID(), last_item );
-    get_event_bus().send_with_talker( this, &wielded, e );
-
-    inv->update_invlet( *wielded );
-    inv->update_cache_with_item( *wielded );
-
+    // if fists are wielded get_wielded_item returns item_location::nowhere, which is a nullptr
+    if( wielded ) {
+        last_item = wielded->typeId();
+        wielded->on_wield( *this );
+        inv->update_invlet( *wielded );
+        inv->update_cache_with_item( *wielded );
+        cata::event e = cata::event::make<event_type::character_wields_item>( getID(), last_item );
+        get_event_bus().send_with_talker( this, &wielded, e );
+    } else {
+        last_item = to_wield.typeId();
+        get_event_bus().send<event_type::character_wields_item>( getID(), item().typeId() );
+    }
     return true;
 }
 
